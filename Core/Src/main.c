@@ -67,12 +67,14 @@ volatile uint8_t flag_log_adc = 0;
 volatile uint32_t adc_accumulator = 0;
 volatile uint8_t adc_sample_count = 0;
 volatile uint32_t adc_avg = 0;
+volatile int16_t previous_encoder_count = 0;
 volatile float u_target_voltage = 0;
 volatile uint16_t adc_target = (uint16_t)((0 * 4095.0f) / (ADC_DIVISOR * VREF));
 volatile uint8_t dac_output = 0;
 uint32_t adc_corrected = 0;
+uint8_t state = 0;
 
-// Empty untill calibration
+// ADC Non Linear Characteristic Compensation LUT
 const lut_point_t adc_correction_lut[] = {
     {0, 0},
     {6, 66},
@@ -131,11 +133,13 @@ void LogGPIOState(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
 void LogStartupMessage(void);
 void WritePortByte(GPIO_TypeDef *GPIOx, uint8_t isHighByte, uint8_t value);
 void ISR_ReadADC(void);
-void App_LogADC(void);
+void App_LogData(void);
 void App_DigitalStabilizer(void);
 uint8_t App_KillSwitch_Check(void);
 uint32_t ApplyADCCorrection(uint32_t raw_value);
 void App_ProcessUartCommand(void);
+void App_HandleEncoderRotation(void);
+void App_HandleEncoderSwitch(void);
 
 /* USER CODE END PFP */
 
@@ -186,6 +190,8 @@ int main(void)
   // Start encoder hardware reading
   HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
 
+  previous_encoder_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
+
   LogStartupMessage();
 
   // Start listening for UART commands
@@ -199,14 +205,20 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // Check for and process UART commands
+    App_KillSwitch_Check();
     App_ProcessUartCommand();
 
-    App_KillSwitch_Check();
+    App_HandleEncoderSwitch();
+    App_HandleEncoderRotation();
 
-    App_LogADC();
+    if (state == 1)
+    {
+      App_LogData();
+      App_DigitalStabilizer();
+    }
 
-    App_DigitalStabilizer();
+    
+
 
     /* USER CODE END WHILE */
 
@@ -866,7 +878,7 @@ uint8_t App_KillSwitch_Check(void)
 
 /// @brief
 /// @param
-void App_LogADC(void)
+void App_LogData(void)
 {
   if (flag_log_adc)
   {
@@ -874,10 +886,77 @@ void App_LogADC(void)
     uint32_t voltage_x100 = (adc_corrected * VREF * ADC_DIVISOR * 100 + 2047) / 4095;
     uint32_t v_int = voltage_x100 / 100;
     uint32_t v_frac = voltage_x100 % 100;
-    int len = sprintf(msg, "ADC_Avg: %lu | ADC_Corr: %lu | V_Out: %lu.%02luV | DAC: %u\r\n", adc_avg, adc_corrected, v_int, v_frac, dac_output);
+    int len = sprintf(msg, "ADC_Avg: %lu | ADC_Corr: %lu | V_Out: %lu.%02luV | DAC: %u | ADC_TARGET: %u\r\n", adc_avg, adc_corrected, v_int, v_frac, dac_output, adc_target);
 
     HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 100);
     flag_log_adc = 0;
+  }
+}
+
+/// @brief
+/// @param
+void App_HandleEncoderSwitch(void)
+{
+  if (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
+  {
+    while (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
+    {
+      HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_SET);
+    }
+
+    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+
+    switch (state)
+    {
+    case 0:
+      state = 1;
+      break;
+    case 1:
+      state = 0;
+      break;
+    }
+  }
+}
+
+/// @brief Adjusts the ADC target voltage based on encoder rotation.
+///        This function reads the encoder, calculates the change, and updates
+///        u_target_voltage and adc_target accordingly.
+void App_HandleEncoderRotation(void)
+{
+  int16_t current_encoder_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  int16_t encoder_diff = current_encoder_count - previous_encoder_count;
+
+  // Handle potential wrap-around for a 16-bit counter (0 to 65535).
+  // Assuming the encoder won't be rotated more than half its range in one loop iteration.
+  // The period is (htim3.Init.Period + 1) because it counts from 0 to Period.
+  if (encoder_diff > (htim3.Init.Period / 2))
+  {
+    encoder_diff -= (htim3.Init.Period + 1);
+  }
+  else if (encoder_diff < -(htim3.Init.Period / 2))
+  {
+    encoder_diff += (htim3.Init.Period + 1);
+  }
+
+  if (encoder_diff != 0)
+  {
+    // Scaling factor: 0.1V per encoder unit.
+    u_target_voltage += (float)encoder_diff * 0.1f;
+
+    // Clamp the target voltage to a valid range
+    const float max_voltage = VREF * ADC_DIVISOR;
+    if (u_target_voltage < 0.0f)
+      u_target_voltage = 0.0f;
+    if (u_target_voltage > max_voltage)
+      u_target_voltage = max_voltage;
+
+    // Update the integer adc_target from the float voltage
+    __disable_irq();
+    adc_target = (uint16_t)((u_target_voltage * 4095.0f) / (VREF * ADC_DIVISOR));
+    __enable_irq();
+
+    // Update previous encoder count
+    previous_encoder_count = current_encoder_count;
   }
 }
 
