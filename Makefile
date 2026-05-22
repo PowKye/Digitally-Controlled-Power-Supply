@@ -58,7 +58,9 @@ Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c \
 Core/Src/system_stm32f1xx.c \
 Core/Src/sysmem.c \
 Core/Src/syscalls.c \
-Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2c.c
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2c.c \
+Core/Src/ssd1306.c \
+Core/Src/ssd1306_fonts.c \
 
 # ASM sources
 ASM_SOURCES =  \
