@@ -24,6 +24,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "ssd1306.h"
+#include "ssd1306_fonts.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,6 +65,7 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+volatile uint8_t flag_update_oled = 0;
 volatile uint8_t flag_log_adc = 0;
 volatile uint32_t adc_accumulator = 0;
 volatile uint8_t adc_sample_count = 0;
@@ -140,6 +143,7 @@ uint32_t ApplyADCCorrection(uint32_t raw_value);
 void App_ProcessUartCommand(void);
 void App_HandleEncoderRotation(void);
 void App_HandleEncoderSwitch(void);
+void App_UpdateOLED(void);
 
 /* USER CODE END PFP */
 
@@ -199,6 +203,10 @@ int main(void)
 
   // Cycle through RGB colors at startup in a blocking manner
   CycleRGBLED(1, 300);
+
+  // Wait for the OLED internal charge-pump to stabilize before initialization
+  HAL_Delay(100);
+  ssd1306_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -217,8 +225,11 @@ int main(void)
       App_DigitalStabilizer();
     }
 
-    
-
+    if (flag_update_oled)
+    {
+      App_UpdateOLED();
+      flag_update_oled = 0;
+    }
 
     /* USER CODE END WHILE */
 
@@ -554,6 +565,56 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/// @brief Updates the OLED display with target or real-time voltages
+void App_UpdateOLED(void)
+{
+  // Cache the previous state and values to prevent I2C bus spam and interrupt lockups
+  static uint8_t last_state = 255;
+  static uint32_t last_v_int = 255;
+  static uint32_t last_v_frac = 255;
+
+  uint32_t v_int = 0;
+  uint32_t v_frac = 0;
+  char display_str[32];
+
+  if (state == 0)
+  {
+    uint32_t target_x100 = (uint32_t)(u_target_voltage * 100.0f);
+    v_int = target_x100 / 100;
+    v_frac = target_x100 % 100;
+  }
+  else if (state == 1)
+  {
+    uint32_t millivolts = (adc_corrected * 3325 * ADC_DIVISOR) / 4095;
+    uint32_t voltage_x100 = millivolts / 10;
+    v_int = voltage_x100 / 100;
+    v_frac = voltage_x100 % 100;
+  }
+
+  // ONLY send I2C commands if the displayed text actually changes
+  if (state == last_state && v_int == last_v_int && v_frac == last_v_frac)
+  {
+    return;
+  }
+
+  last_state = state;
+  last_v_int = v_int;
+  last_v_frac = v_frac;
+
+  ssd1306_Fill(Black);
+
+  ssd1306_SetCursor(5, 3);
+  if (state == 0)
+    ssd1306_WriteString("TARGET VOLTAGE:", Font_7x10, White);
+  else
+    ssd1306_WriteString("OUTPUT VOLTAGE:", Font_7x10, White);
+
+  sprintf(display_str, "%lu.%02lu V", v_int, v_frac);
+  ssd1306_SetCursor(5, 30);
+  ssd1306_WriteString(display_str, Font_11x18, White);
+  ssd1306_UpdateScreen();
+}
+
 /// @brief Applies correction to a raw ADC value using an interpolated Look-Up Table.
 /// @param raw_value The raw ADC value to be corrected.
 /// @return The corrected ADC value.
@@ -851,26 +912,29 @@ uint8_t App_KillSwitch_Check(void)
   // Global "Kill Switch" check
   if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
   {
-    // Set outputs to a safe state
-    WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
-    dac_output = 0;
-
-    // Indicate stop state (e.g., red LED on)
-    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
-
-    // Wait until the button is released
-    while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+    HAL_Delay(10); // Debounce to filter noise
+    if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
     {
-    }
+      // Set outputs to a safe state
+      WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
+      dac_output = 0;
 
-    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+      // Indicate stop state (e.g., red LED on)
+      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
 
-    // Button released - enter permanent stop state
-    // The system will remain in this state until a hardware reset.
-    while (1)
-    {
+      // Wait until the button is released
+      while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+      {
+      }
+
+      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+
+      // Button released - enter permanent stop state
+      while (1)
+      {
+      }
     }
   }
   return 0; // Kill switch not active, continue normal operation
@@ -899,21 +963,20 @@ void App_HandleEncoderSwitch(void)
 {
   if (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
   {
-    while (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
+    HAL_Delay(50); // Debounce the switch contact
+    if (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
     {
       HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_SET);
-    }
 
-    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+      // Wait for release
+      while (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
+      {
+      }
 
-    switch (state)
-    {
-    case 0:
-      state = 1;
-      break;
-    case 1:
-      state = 0;
-      break;
+      HAL_Delay(50); // Debounce release
+      HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+
+      state = (state == 0) ? 1 : 0;
     }
   }
 }
@@ -938,10 +1001,13 @@ void App_HandleEncoderRotation(void)
     encoder_diff += (htim3.Init.Period + 1);
   }
 
-  if (encoder_diff != 0)
+  // Divide by 2 because the timer registers 2 counts per physical encoder click
+  int16_t clicks = encoder_diff / 2;
+
+  if (clicks != 0)
   {
-    // Scaling factor: 0.1V per encoder unit.
-    u_target_voltage += (float)encoder_diff * 0.1f;
+    // Scaling factor: 0.1V per physical click.
+    u_target_voltage += (float)clicks * 0.1f;
 
     // Clamp the target voltage to a valid range
     const float max_voltage = VREF * ADC_DIVISOR;
@@ -955,8 +1021,8 @@ void App_HandleEncoderRotation(void)
     adc_target = (uint16_t)((u_target_voltage * 4095.0f) / (VREF * ADC_DIVISOR));
     __enable_irq();
 
-    // Update previous encoder count
-    previous_encoder_count = current_encoder_count;
+    // Update previous encoder count, preserving any remainder (half-steps) for the next read
+    previous_encoder_count += clicks * 2;
   }
 }
 
@@ -1015,6 +1081,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     {
       flag_log_adc = 1; // Send the flag to the main function
       ticks = 0;
+    }
+
+    // Tick divider from 10ms to 100ms for OLED updates
+    static uint8_t oled_ticks = 0;
+    oled_ticks++;
+    if (oled_ticks >= 10) // 10 ticks * 10 ms = 100 ms
+    {
+      flag_update_oled = 1; // Trigger OLED update
+      oled_ticks = 0;
     }
   }
 }
