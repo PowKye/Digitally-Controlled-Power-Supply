@@ -44,7 +44,7 @@ typedef struct
 #define STABILIZER_MAX_STEP 10
 #define STABILIZER_DEADBAND 5
 #define UART_RX_BUFFER_SIZE 32
-#define VREF 3.325f
+#define VREF_MILV 3325
 #define ADC_DIVISOR 3
 
 /* USER CODE END PD */
@@ -67,14 +67,16 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 volatile uint8_t flag_update_oled = 0;
 volatile uint8_t flag_log_adc = 0;
+
 volatile uint32_t adc_accumulator = 0;
 volatile uint8_t adc_sample_count = 0;
 volatile uint32_t adc_avg = 0;
-volatile int16_t previous_encoder_count = 0;
-volatile float u_target_voltage = 0;
-volatile uint16_t adc_target = (uint16_t)((0 * 4095.0f) / (ADC_DIVISOR * VREF));
-volatile uint8_t dac_output = 0;
+volatile uint32_t target_voltage_mV = 0;
+volatile uint16_t adc_target = 0;
 uint32_t adc_corrected = 0;
+
+volatile uint8_t dac_output = 0;
+volatile int16_t previous_encoder_count = 0;
 uint8_t state = 0;
 
 // ADC Non Linear Characteristic Compensation LUT
@@ -131,18 +133,18 @@ static void MX_I2C1_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
-void CycleRGBLED(int numCycles, int delayMs);
 void LogGPIOState(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
+void CycleRGBLED(int numCycles, int delayMs);
 void LogStartupMessage(void);
 void WritePortByte(GPIO_TypeDef *GPIOx, uint8_t isHighByte, uint8_t value);
+uint8_t App_KillSwitch_Check(void);
 void ISR_ReadADC(void);
 void App_LogData(void);
 void App_DigitalStabilizer(void);
-uint8_t App_KillSwitch_Check(void);
 uint32_t ApplyADCCorrection(uint32_t raw_value);
 void App_ProcessUartCommand(void);
-void App_HandleEncoderRotation(void);
 void App_HandleEncoderSwitch(void);
+void App_HandleEncoderRotation(void);
 void App_UpdateOLED(void);
 
 /* USER CODE END PFP */
@@ -194,8 +196,10 @@ int main(void)
   // Start encoder hardware reading
   HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
 
+  // Initializr encoder counter
   previous_encoder_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
 
+  // Log startup message in the serial terminal
   LogStartupMessage();
 
   // Start listening for UART commands
@@ -204,8 +208,7 @@ int main(void)
   // Cycle through RGB colors at startup in a blocking manner
   CycleRGBLED(1, 300);
 
-  // Wait for the OLED internal charge-pump to stabilize before initialization
-  HAL_Delay(100);
+  // Initialize the OLED display
   ssd1306_Init();
   /* USER CODE END 2 */
 
@@ -565,205 +568,6 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-/// @brief Updates the OLED display with target or real-time voltages
-void App_UpdateOLED(void)
-{
-  // Cache the previous state and values to prevent I2C bus spam and interrupt lockups
-  static uint8_t last_state = 255;
-  static uint32_t last_v_int = 255;
-  static uint32_t last_v_frac = 255;
-
-  uint32_t v_int = 0;
-  uint32_t v_frac = 0;
-  char display_str[32];
-
-  if (state == 0)
-  {
-    uint32_t target_x100 = (uint32_t)(u_target_voltage * 100.0f);
-    v_int = target_x100 / 100;
-    v_frac = target_x100 % 100;
-  }
-  else if (state == 1)
-  {
-    uint32_t millivolts = (adc_corrected * 3325 * ADC_DIVISOR) / 4095;
-    uint32_t voltage_x100 = millivolts / 10;
-    v_int = voltage_x100 / 100;
-    v_frac = voltage_x100 % 100;
-  }
-
-  // ONLY send I2C commands if the displayed text actually changes
-  if (state == last_state && v_int == last_v_int && v_frac == last_v_frac)
-  {
-    return;
-  }
-
-  last_state = state;
-  last_v_int = v_int;
-  last_v_frac = v_frac;
-
-  ssd1306_Fill(Black);
-
-  ssd1306_SetCursor(5, 3);
-  if (state == 0)
-    ssd1306_WriteString("TARGET VOLTAGE:", Font_7x10, White);
-  else
-    ssd1306_WriteString("OUTPUT VOLTAGE:", Font_7x10, White);
-
-  sprintf(display_str, "%lu.%02lu V", v_int, v_frac);
-  ssd1306_SetCursor(5, 30);
-  ssd1306_WriteString(display_str, Font_11x18, White);
-  ssd1306_UpdateScreen();
-}
-
-/// @brief Applies correction to a raw ADC value using an interpolated Look-Up Table.
-/// @param raw_value The raw ADC value to be corrected.
-/// @return The corrected ADC value.
-uint32_t ApplyADCCorrection(uint32_t raw_value)
-{
-  // If the LUT is empty or has only one point, no interpolation is possible. Return the raw value.
-  if (adc_lut_size < 2)
-  {
-    return raw_value;
-  }
-
-  // Handle boundary conditions: if the value is outside the table's range,
-  // clamp it to the nearest boundary's corrected value.
-  if (raw_value <= adc_correction_lut[0].raw_reading)
-  {
-    return adc_correction_lut[0].corrected_value;
-  }
-  if (raw_value >= adc_correction_lut[adc_lut_size - 1].raw_reading)
-  {
-    return adc_correction_lut[adc_lut_size - 1].corrected_value;
-  }
-
-  // Find the two points in the LUT that bracket the raw_value.
-  // The table is assumed to be sorted by raw_reading.
-  for (int i = 0; i < adc_lut_size - 1; i++)
-  {
-    if (raw_value >= adc_correction_lut[i].raw_reading && raw_value <= adc_correction_lut[i + 1].raw_reading)
-    {
-      // Found the segment. Perform linear interpolation.
-      uint32_t x0 = adc_correction_lut[i].raw_reading;
-      uint32_t y0 = adc_correction_lut[i].corrected_value;
-      uint32_t x1 = adc_correction_lut[i + 1].raw_reading;
-      uint32_t y1 = adc_correction_lut[i + 1].corrected_value;
-
-      // Use 64-bit integers for intermediate calculations to prevent overflow.
-      int64_t numerator = (int64_t)(raw_value - x0) * (int64_t)(y1 - y0);
-      int64_t denominator = (int64_t)(x1 - x0);
-
-      // Return the interpolated value. Avoid division by zero.
-      return (denominator != 0) ? (y0 + (uint32_t)(numerator / denominator)) : y0;
-    }
-  }
-
-  // Should not be reached if the value is within the table range, but as a fallback:
-  return raw_value;
-}
-
-/// @brief Processes commands received over UART.
-///        Parses commands to update the ADC target value.
-///        Supported commands: +, -, V=<float>, T=<int>
-void App_ProcessUartCommand(void)
-{
-  // Check if a command is ready to be processed.
-  if (uart_cmd_ready_flag)
-  {
-    // Use a local buffer to safely process the command without race conditions.
-    char cmd_buffer[UART_RX_BUFFER_SIZE];
-
-    // Create a critical section to atomically copy the command and clear the flag.
-    __disable_irq();
-    strcpy(cmd_buffer, (const char *)uart_rx_buffer);
-    uart_cmd_ready_flag = 0; // Clear the flag immediately so the ISR can receive the next command.
-    __enable_irq();
-
-    // Now, parse the command from the safe local buffer.
-    uint8_t flag_target_updated_serial = 0;
-
-    // Check for incremental commands
-    if (strcmp(cmd_buffer, "+") == 0)
-    {
-      u_target_voltage += 0.1f;
-      flag_target_updated_serial = 1;
-    }
-    else if (strcmp(cmd_buffer, "-") == 0)
-    {
-      u_target_voltage -= 0.1f;
-      flag_target_updated_serial = 1;
-    }
-    else
-    {
-      // Command not recognized
-      char msg[40];
-      sprintf(msg, "ERR: Unknown cmd. Use: + or -\r\n");
-      HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
-    }
-
-    if (flag_target_updated_serial)
-    {
-      // Clamp the target voltage to a safe/valid range
-      const float max_voltage = VREF * ADC_DIVISOR;
-      if (u_target_voltage < 0.0f)
-        u_target_voltage = 0.0f;
-      if (u_target_voltage > max_voltage)
-        u_target_voltage = max_voltage;
-
-      // Update the integer adc_target from the float voltage
-      __disable_irq();
-      adc_target = (uint16_t)((u_target_voltage * 4095.0f) / (VREF * ADC_DIVISOR));
-      __enable_irq();
-
-      // Log confirmation message
-      char msg[60];
-      uint32_t v_int = (uint32_t)u_target_voltage;
-      uint32_t v_frac = (uint32_t)((u_target_voltage - v_int) * 100);
-      int len = sprintf(msg, "OK: Target set to %lu.%02luV (ADC: %u)\r\n", v_int, v_frac, adc_target);
-      HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 100);
-    }
-  }
-}
-
-/// @brief Loggs startup message through UART1
-/// @param
-void LogStartupMessage(void)
-{
-  char *msg = "P2 v.1 running\r\n";
-
-  HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-}
-
-/// @brief  Cycles through a blocking R-G-B sequence on the built-in RGB LED.
-/// @param numCycles The number of times to cycle through Red, Green, and Blue.
-/// @param delayMs The time in milliseconds to keep each color on.
-void CycleRGBLED(int numCycles, int delayMs)
-{
-  for (int i = 0; i < numCycles; i++)
-  {
-    // --- RED ---
-    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
-    HAL_Delay(delayMs);
-
-    // --- GREEN ---
-    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_SET);
-    HAL_Delay(delayMs);
-
-    // --- BLUE ---
-    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_SET);
-    HAL_Delay(delayMs);
-  }
-
-  // Turn all LEDs off at the end of the sequence.
-  HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
-}
-
 /// @brief Loggs State of GPIOx_Pin through UART1
 /// @param GPIOx
 /// @param GPIO_Pin
@@ -798,6 +602,45 @@ void LogGPIOState(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
 }
 
+/// @brief  Cycles through a blocking R-G-B sequence on the built-in RGB LED.
+/// @param numCycles The number of times to cycle through Red, Green, and Blue.
+/// @param delayMs The time in milliseconds to keep each color on.
+void CycleRGBLED(int numCycles, int delayMs)
+{
+  for (int i = 0; i < numCycles; i++)
+  {
+    // --- RED ---
+    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(delayMs);
+
+    // --- GREEN ---
+    HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(delayMs);
+
+    // --- BLUE ---
+    HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(delayMs);
+  }
+
+  // Turn all LEDs off at the end of the sequence.
+  HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+}
+
+/// @brief Loggs startup message through UART1
+/// @param
+void LogStartupMessage(void)
+{
+  char *msg = "P2 v.1 running\r\n";
+
+  HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+}
+
 /// @brief Atomically writes an 8-bit value to either the high or low byte of a given GPIO port
 /// @param GPIOx Port to write to (e.g., GPIOB)
 /// @param isHighByte 1 to target pins 8-15, 0 to target pins 0-7
@@ -814,6 +657,43 @@ void WritePortByte(GPIO_TypeDef *GPIOx, uint8_t isHighByte, uint8_t value)
     // Target pins 0-7: Set mask shifted by 0, Reset mask shifted by 16
     GPIOx->BSRR = (uint32_t)value | ((uint32_t)(~value & 0xFF) << 16);
   }
+}
+
+/// @brief Checks the state of the global kill switch (PC13).
+///        If active, it sets outputs to a safe state, signals with LEDs,
+///        waits for the switch to be released, and then enters a permanent stop state.
+///@retval 1 if the kill switch was active and handled, 0 otherwise.
+uint8_t App_KillSwitch_Check(void)
+{
+  // Global "Kill Switch" check
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+  {
+    HAL_Delay(10); // Debounce to filter noise
+    if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+    {
+      // Set outputs to a safe state
+      WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
+      dac_output = 0;
+
+      // Indicate stop state (e.g., red LED on)
+      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+
+      // Wait until the button is released
+      while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+      {
+      }
+
+      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+
+      // Button released - enter permanent stop state
+      while (1)
+      {
+      }
+    }
+  }
+  return 0; // Kill switch not active, continue normal operation
 }
 
 /// @brief Reads ADC value and accumulates it for averaging.
@@ -836,6 +716,23 @@ void ISR_ReadADC(void)
     // Accumulate data for the digital stabilizer
     adc_accumulator += adc_raw_value;
     adc_sample_count++;
+  }
+}
+
+/// @brief
+/// @param
+void App_LogData(void)
+{
+  if (flag_log_adc)
+  {
+    char msg[90];
+    uint32_t voltage_mV = (adc_corrected * VREF_MILV * ADC_DIVISOR + 2047) / 4095;
+    uint32_t v_int = voltage_mV / 1000;
+    uint32_t v_frac = (voltage_mV % 1000) / 10;
+    int len = sprintf(msg, "ADC_Avg: %lu | ADC_Corr: %lu | V_Out: %lu.%02luV | DAC: %u | ADC_TARGET: %u\r\n", adc_avg, adc_corrected, v_int, v_frac, dac_output, adc_target);
+
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 100);
+    flag_log_adc = 0;
   }
 }
 
@@ -903,57 +800,114 @@ void App_DigitalStabilizer(void)
   }
 }
 
-/// @brief Checks the state of the global kill switch (PC13).
-///        If active, it sets outputs to a safe state, signals with LEDs,
-///        waits for the switch to be released, and then enters a permanent stop state.
-///@retval 1 if the kill switch was active and handled, 0 otherwise.
-uint8_t App_KillSwitch_Check(void)
+/// @brief Applies correction to a raw ADC value using an interpolated Look-Up Table.
+/// @param raw_value The raw ADC value to be corrected.
+/// @return The corrected ADC value.
+uint32_t ApplyADCCorrection(uint32_t raw_value)
 {
-  // Global "Kill Switch" check
-  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+  // If the LUT is empty or has only one point, no interpolation is possible. Return the raw value.
+  if (adc_lut_size < 2)
   {
-    HAL_Delay(10); // Debounce to filter noise
-    if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+    return raw_value;
+  }
+
+  // Handle boundary conditions: if the value is outside the table's range,
+  // clamp it to the nearest boundary's corrected value.
+  if (raw_value <= adc_correction_lut[0].raw_reading)
+  {
+    return adc_correction_lut[0].corrected_value;
+  }
+  if (raw_value >= adc_correction_lut[adc_lut_size - 1].raw_reading)
+  {
+    return adc_correction_lut[adc_lut_size - 1].corrected_value;
+  }
+
+  // Find the two points in the LUT that bracket the raw_value.
+  // The table is assumed to be sorted by raw_reading.
+  for (int i = 0; i < adc_lut_size - 1; i++)
+  {
+    if (raw_value >= adc_correction_lut[i].raw_reading && raw_value <= adc_correction_lut[i + 1].raw_reading)
     {
-      // Set outputs to a safe state
-      WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
-      dac_output = 0;
+      // Found the segment. Perform linear interpolation.
+      uint32_t x0 = adc_correction_lut[i].raw_reading;
+      uint32_t y0 = adc_correction_lut[i].corrected_value;
+      uint32_t x1 = adc_correction_lut[i + 1].raw_reading;
+      uint32_t y1 = adc_correction_lut[i + 1].corrected_value;
 
-      // Indicate stop state (e.g., red LED on)
-      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
+      // Use 64-bit integers for intermediate calculations to prevent overflow.
+      int64_t numerator = (int64_t)(raw_value - x0) * (int64_t)(y1 - y0);
+      int64_t denominator = (int64_t)(x1 - x0);
 
-      // Wait until the button is released
-      while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
-      {
-      }
-
-      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
-
-      // Button released - enter permanent stop state
-      while (1)
-      {
-      }
+      // Return the interpolated value. Avoid division by zero.
+      return (denominator != 0) ? (y0 + (uint32_t)(numerator / denominator)) : y0;
     }
   }
-  return 0; // Kill switch not active, continue normal operation
+
+  // Should not be reached if the value is within the table range, but as a fallback:
+  return raw_value;
 }
 
-/// @brief
-/// @param
-void App_LogData(void)
+/// @brief Processes commands received over UART.
+///        Parses commands to update the ADC target value.
+///        Supported commands: +, -
+void App_ProcessUartCommand(void)
 {
-  if (flag_log_adc)
+  // Check if a command is ready to be processed.
+  if (uart_cmd_ready_flag)
   {
-    char msg[90];
-    uint32_t voltage_x100 = (adc_corrected * VREF * ADC_DIVISOR * 100 + 2047) / 4095;
-    uint32_t v_int = voltage_x100 / 100;
-    uint32_t v_frac = voltage_x100 % 100;
-    int len = sprintf(msg, "ADC_Avg: %lu | ADC_Corr: %lu | V_Out: %lu.%02luV | DAC: %u | ADC_TARGET: %u\r\n", adc_avg, adc_corrected, v_int, v_frac, dac_output, adc_target);
+    // Use a local buffer to safely process the command without race conditions.
+    char cmd_buffer[UART_RX_BUFFER_SIZE];
 
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 100);
-    flag_log_adc = 0;
+    // Create a critical section to atomically copy the command and clear the flag.
+    __disable_irq();
+    strcpy(cmd_buffer, (const char *)uart_rx_buffer);
+    uart_cmd_ready_flag = 0; // Clear the flag immediately so the ISR can receive the next command.
+    __enable_irq();
+
+    // Now, parse the command from the safe local buffer.
+    uint8_t flag_target_updated_serial = 0;
+
+    // Check for incremental commands
+    if (strcmp(cmd_buffer, "+") == 0)
+    {
+      target_voltage_mV += 100;
+      flag_target_updated_serial = 1;
+    }
+    else if (strcmp(cmd_buffer, "-") == 0)
+    {
+      if (target_voltage_mV >= 100)
+        target_voltage_mV -= 100;
+      else
+        target_voltage_mV = 0;
+      flag_target_updated_serial = 1;
+    }
+    else
+    {
+      // Command not recognized
+      char msg[40];
+      sprintf(msg, "ERR: Unknown cmd. Use: + or -\r\n");
+      HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+    }
+
+    if (flag_target_updated_serial)
+    {
+      // Clamp the target voltage to a safe/valid range
+      const uint32_t max_voltage_mV = VREF_MILV * ADC_DIVISOR;
+      if (target_voltage_mV > max_voltage_mV)
+        target_voltage_mV = max_voltage_mV;
+
+      // Update the integer adc_target from the float voltage
+      __disable_irq();
+      adc_target = (uint16_t)((target_voltage_mV * 4095) / max_voltage_mV);
+      __enable_irq();
+
+      // Log confirmation message
+      char msg[60];
+      uint32_t v_int = target_voltage_mV / 1000;
+      uint32_t v_frac = (target_voltage_mV % 1000) / 10;
+      int len = sprintf(msg, "OK: Target set to %lu.%02luV (ADC: %u)\r\n", v_int, v_frac, adc_target);
+      HAL_UART_Transmit(&huart1, (uint8_t *)msg, len, 100);
+    }
   }
 }
 
@@ -1007,23 +961,73 @@ void App_HandleEncoderRotation(void)
   if (clicks != 0)
   {
     // Scaling factor: 0.1V per physical click.
-    u_target_voltage += (float)clicks * 0.1f;
+    int32_t new_target_mV = (int32_t)target_voltage_mV + (clicks * 100);
 
     // Clamp the target voltage to a valid range
-    const float max_voltage = VREF * ADC_DIVISOR;
-    if (u_target_voltage < 0.0f)
-      u_target_voltage = 0.0f;
-    if (u_target_voltage > max_voltage)
-      u_target_voltage = max_voltage;
+    const int32_t max_voltage_mV = VREF_MILV * ADC_DIVISOR;
+    if (new_target_mV < 0)
+      target_voltage_mV = 0;
+    else if (new_target_mV > max_voltage_mV)
+      target_voltage_mV = max_voltage_mV;
+    else
+      target_voltage_mV = (uint32_t)new_target_mV;
 
     // Update the integer adc_target from the float voltage
     __disable_irq();
-    adc_target = (uint16_t)((u_target_voltage * 4095.0f) / (VREF * ADC_DIVISOR));
+    adc_target = (uint16_t)((target_voltage_mV * 4095) / max_voltage_mV);
     __enable_irq();
 
     // Update previous encoder count, preserving any remainder (half-steps) for the next read
     previous_encoder_count += clicks * 2;
   }
+}
+
+/// @brief Updates the OLED display with target or real-time voltages
+void App_UpdateOLED(void)
+{
+  // Cache the previous state and values to prevent I2C bus spam and interrupt lockups
+  static uint8_t last_state = 255;
+  static uint32_t last_v_int = 255;
+  static uint32_t last_v_frac = 255;
+
+  uint32_t v_int = 0;
+  uint32_t v_frac = 0;
+  char display_str[32];
+
+  if (state == 0)
+  {
+    v_int = target_voltage_mV / 1000;
+    v_frac = (target_voltage_mV % 1000) / 10;
+  }
+  else if (state == 1)
+  {
+    uint32_t voltage_mV = (adc_corrected * VREF_MILV * ADC_DIVISOR + 2047) / 4095;
+    v_int = voltage_mV / 1000;
+    v_frac = (voltage_mV % 1000) / 10;
+  }
+
+  // ONLY send I2C commands if the displayed text actually changes
+  if (state == last_state && v_int == last_v_int && v_frac == last_v_frac)
+  {
+    return;
+  }
+
+  last_state = state;
+  last_v_int = v_int;
+  last_v_frac = v_frac;
+
+  ssd1306_Fill(Black);
+
+  ssd1306_SetCursor(5, 3);
+  if (state == 0)
+    ssd1306_WriteString("TARGET VOLTAGE:", Font_7x10, White);
+  else
+    ssd1306_WriteString("OUTPUT VOLTAGE:", Font_7x10, White);
+
+  sprintf(display_str, "%lu.%02lu V", v_int, v_frac);
+  ssd1306_SetCursor(5, 30);
+  ssd1306_WriteString(display_str, Font_11x18, White);
+  ssd1306_UpdateScreen();
 }
 
 /// @brief  Rx Transfer completed callback.
