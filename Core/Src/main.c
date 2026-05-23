@@ -676,6 +676,9 @@ uint8_t App_KillSwitch_Check(void)
       WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
       dac_output = 0;
 
+      ssd1306_Fill(Black);
+      ssd1306_UpdateScreen();
+
       // Indicate stop state (red LED on)
       HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
@@ -689,9 +692,16 @@ uint8_t App_KillSwitch_Check(void)
       // Button released - enter permanent stop state
       while (1)
       {
-        HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
-        HAL_Delay(500);
+        ssd1306_SetCursor(27, 20);
+        ssd1306_WriteString("H MODE", Font_11x18, White);
+        ssd1306_UpdateScreen();
         HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
+
+        HAL_Delay(500);
+
+        ssd1306_Fill(Black);
+        ssd1306_UpdateScreen();
+        HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
         HAL_Delay(500);
       }
     }
@@ -901,7 +911,7 @@ void App_ProcessUartCommand(void)
 
       // Update the integer adc_target from the float voltage
       __disable_irq();
-      adc_target = (uint16_t)((target_voltage_mV * 4095) / VREF_MILV * ADC_DIVISOR);
+      adc_target = (uint16_t)((target_voltage_mV * 4095) / (VREF_MILV * ADC_DIVISOR));
       __enable_irq();
 
       // Log confirmation message
@@ -977,7 +987,7 @@ void App_HandleEncoderRotation(void)
 
     // Update the integer adc_target from the float voltage
     __disable_irq();
-    adc_target = (uint16_t)((target_voltage_mV * 4095) / max_voltage_mV);
+    adc_target = (uint16_t)((target_voltage_mV * 4095) / (VREF_MILV * ADC_DIVISOR));
     __enable_irq();
 
     // Update previous encoder count, preserving any remainder (half-steps) for the next read
@@ -1028,7 +1038,7 @@ void App_UpdateOLED(void)
     ssd1306_WriteString("OUTPUT VOLTAGE:", Font_7x10, White);
 
   sprintf(display_str, "%lu.%02lu V", v_int, v_frac);
-  ssd1306_SetCursor(5, 30);
+  ssd1306_SetCursor(30, 30);
   ssd1306_WriteString(display_str, Font_11x18, White);
   ssd1306_UpdateScreen();
 }
