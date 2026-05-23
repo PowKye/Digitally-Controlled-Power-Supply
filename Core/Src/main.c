@@ -45,6 +45,7 @@ typedef struct
 #define STABILIZER_DEADBAND 5
 #define UART_RX_BUFFER_SIZE 32
 #define VREF_MILV 3325
+#define MAX_MILV 9000
 #define ADC_DIVISOR 3
 
 /* USER CODE END PD */
@@ -118,7 +119,7 @@ const int adc_lut_size = sizeof(adc_correction_lut) / sizeof(adc_correction_lut[
 // UART command processing
 volatile uint8_t uart_rx_buffer[UART_RX_BUFFER_SIZE];
 volatile uint8_t uart_rx_index = 0;
-volatile uint8_t uart_cmd_ready_flag = 0;
+volatile uint8_t flag_uart_cmd_ready = 0;
 uint8_t uart_rx_char[1]; // Buffer for HAL_UART_Receive_IT
 
 /* USER CODE END PV */
@@ -675,7 +676,7 @@ uint8_t App_KillSwitch_Check(void)
       WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
       dac_output = 0;
 
-      // Indicate stop state (e.g., red LED on)
+      // Indicate stop state (red LED on)
       HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(GPIOB, G_LED_Pin, GPIO_PIN_RESET);
       HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
@@ -685,11 +686,13 @@ uint8_t App_KillSwitch_Check(void)
       {
       }
 
-      HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
-
       // Button released - enter permanent stop state
       while (1)
       {
+        HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_RESET);
+        HAL_Delay(500);
+        HAL_GPIO_WritePin(GPIOB, R_LED_Pin, GPIO_PIN_SET);
+        HAL_Delay(500);
       }
     }
   }
@@ -853,7 +856,7 @@ uint32_t ApplyADCCorrection(uint32_t raw_value)
 void App_ProcessUartCommand(void)
 {
   // Check if a command is ready to be processed.
-  if (uart_cmd_ready_flag)
+  if (flag_uart_cmd_ready)
   {
     // Use a local buffer to safely process the command without race conditions.
     char cmd_buffer[UART_RX_BUFFER_SIZE];
@@ -861,7 +864,7 @@ void App_ProcessUartCommand(void)
     // Create a critical section to atomically copy the command and clear the flag.
     __disable_irq();
     strcpy(cmd_buffer, (const char *)uart_rx_buffer);
-    uart_cmd_ready_flag = 0; // Clear the flag immediately so the ISR can receive the next command.
+    flag_uart_cmd_ready = 0; // Clear the flag immediately so the ISR can receive the next command.
     __enable_irq();
 
     // Now, parse the command from the safe local buffer.
@@ -891,14 +894,14 @@ void App_ProcessUartCommand(void)
 
     if (flag_target_updated_serial)
     {
-      // Clamp the target voltage to a safe/valid range
-      const uint32_t max_voltage_mV = VREF_MILV * ADC_DIVISOR;
+      // Clamp the target voltage to a valid range
+      const uint32_t max_voltage_mV = MAX_MILV;
       if (target_voltage_mV > max_voltage_mV)
         target_voltage_mV = max_voltage_mV;
 
       // Update the integer adc_target from the float voltage
       __disable_irq();
-      adc_target = (uint16_t)((target_voltage_mV * 4095) / max_voltage_mV);
+      adc_target = (uint16_t)((target_voltage_mV * 4095) / VREF_MILV * ADC_DIVISOR);
       __enable_irq();
 
       // Log confirmation message
@@ -911,8 +914,8 @@ void App_ProcessUartCommand(void)
   }
 }
 
-/// @brief
-/// @param
+/// @brief Handles rotary encoder switch press
+///        Cycles through states 0 - 1
 void App_HandleEncoderSwitch(void)
 {
   if (HAL_GPIO_ReadPin(GPIOA, ENC_SW_Pin) == GPIO_PIN_RESET)
@@ -964,7 +967,7 @@ void App_HandleEncoderRotation(void)
     int32_t new_target_mV = (int32_t)target_voltage_mV + (clicks * 100);
 
     // Clamp the target voltage to a valid range
-    const int32_t max_voltage_mV = VREF_MILV * ADC_DIVISOR;
+    const int32_t max_voltage_mV = MAX_MILV;
     if (new_target_mV < 0)
       target_voltage_mV = 0;
     else if (new_target_mV > max_voltage_mV)
@@ -1044,7 +1047,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       // Treat '+' and '-' as complete commands
       uart_rx_buffer[0] = received_char;
       uart_rx_buffer[1] = '\0';
-      uart_cmd_ready_flag = 1;
+      flag_uart_cmd_ready = 1;
       uart_rx_index = 0; // Reset for next command
     }
     else if (received_char == '\r' || received_char == '\n')
@@ -1052,7 +1055,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       if (uart_rx_index > 0) // Command received
       {
         uart_rx_buffer[uart_rx_index] = '\0'; // Null-terminate the string
-        uart_cmd_ready_flag = 1;              // Set flag for main loop to process
+        flag_uart_cmd_ready = 1;              // Set flag for main loop to process
         uart_rx_index = 0;                    // Reset for next command
       }
     }
