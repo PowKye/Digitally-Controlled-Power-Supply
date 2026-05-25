@@ -197,7 +197,7 @@ int main(void)
   // Start encoder hardware reading
   HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
 
-  // Initializr encoder counter
+  // Initialize encoder counter
   previous_encoder_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
 
   // Log startup message in the serial terminal
@@ -569,9 +569,9 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-/// @brief Loggs State of GPIOx_Pin through UART1
-/// @param GPIOx
-/// @param GPIO_Pin
+/// @brief Logs State of GPIOx_Pin through UART1
+/// @param GPIOx Port to read from
+/// @param GPIO_Pin Pin to read state of
 void LogGPIOState(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
 {
   GPIO_PinState state = HAL_GPIO_ReadPin(GPIOx, GPIO_Pin);
@@ -633,8 +633,7 @@ void CycleRGBLED(int numCycles, int delayMs)
   HAL_GPIO_WritePin(GPIOA, B_LED_Pin, GPIO_PIN_RESET);
 }
 
-/// @brief Loggs startup message through UART1
-/// @param
+/// @brief Logs startup message through UART1
 void LogStartupMessage(void)
 {
   char *msg = "P2 v.1 running\r\n";
@@ -663,7 +662,7 @@ void WritePortByte(GPIO_TypeDef *GPIOx, uint8_t isHighByte, uint8_t value)
 /// @brief Checks the state of the global kill switch (PC13).
 ///        If active, it sets outputs to a safe state, signals with LEDs,
 ///        waits for the switch to be released, and then enters a permanent stop state.
-///@retval 1 if the kill switch was active and handled, 0 otherwise.
+/// @retval 1 if the kill switch was active and handled, 0 otherwise.
 uint8_t App_KillSwitch_Check(void)
 {
   // Global "Kill Switch" check
@@ -710,7 +709,6 @@ uint8_t App_KillSwitch_Check(void)
 }
 
 /// @brief Reads ADC value and accumulates it for averaging.
-/// @param
 void ISR_ReadADC(void)
 {
   HAL_ADC_Start(&hadc1);
@@ -732,8 +730,7 @@ void ISR_ReadADC(void)
   }
 }
 
-/// @brief
-/// @param
+/// @brief Logs ADC data and state to UART.
 void App_LogData(void)
 {
   if (flag_log_adc)
@@ -750,8 +747,7 @@ void App_LogData(void)
 }
 
 /// @brief Counts adc_sample_counts and performs an average.
-///        Then computes the error and the dynamic step necesarry to correct it
-/// @param
+///        Then computes the error and the dynamic step necessary to correct it
 void App_DigitalStabilizer(void)
 {
   // Process only if 10 readings have been accumulated (100ms at 10ms rate)
@@ -950,7 +946,7 @@ void App_HandleEncoderSwitch(void)
 
 /// @brief Adjusts the ADC target voltage based on encoder rotation.
 ///        This function reads the encoder, calculates the change, and updates
-///        u_target_voltage and adc_target accordingly.
+///        target_voltage_mV and adc_target accordingly.
 void App_HandleEncoderRotation(void)
 {
   int16_t current_encoder_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
@@ -1044,7 +1040,7 @@ void App_UpdateOLED(void)
 }
 
 /// @brief  Rx Transfer completed callback.
-/// @param  huart: UART handle
+/// @param  huart UART handle
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
@@ -1083,8 +1079,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
-/// @brief
-/// @param htim
+/// @brief Timer period elapsed callback.
+/// @param htim TIM handle
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
