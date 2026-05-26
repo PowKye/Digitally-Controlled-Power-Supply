@@ -40,9 +40,10 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define STABILIZER_KP_DIVISOR 16
-#define STABILIZER_MAX_STEP 10
-#define STABILIZER_DEADBAND 5
+#define STABILIZER_KP 0.04f
+#define STABILIZER_KI 0.02f
+#define STABILIZER_KD 0.00f
+#define STABILIZER_DEADBAND 12
 #define UART_RX_BUFFER_SIZE 32
 #define VREF_MILV 3325
 #define MAX_MILV 9000
@@ -79,6 +80,14 @@ uint32_t adc_corrected = 0;
 volatile uint8_t dac_output = 0;
 volatile int16_t previous_encoder_count = 0;
 uint8_t state = 0;
+
+float step = 0.0f;
+float step_p = 0.0f;
+float step_i = 0.0f;
+float step_d = 0.0f;
+int32_t error_prev = 0;
+int32_t error_prev2 = 0;
+float pid_dac_out = 0.0f;
 
 // ADC Non Linear Characteristic Compensation LUT
 const lut_point_t adc_correction_lut[] = {
@@ -674,6 +683,7 @@ uint8_t App_KillSwitch_Check(void)
       // Set outputs to a safe state
       WritePortByte(GPIOB, 1, 0); // Set DAC output to 0
       dac_output = 0;
+      pid_dac_out = 0.0f;
 
       ssd1306_Fill(Black);
       ssd1306_UpdateScreen();
@@ -769,41 +779,47 @@ void App_DigitalStabilizer(void)
 
     // Slow comparator
     int32_t error = adc_target - adc_corrected;
-    int32_t step = 0;
 
     // Apply deadband to prevent constant small adjustments
     if (abs(error) > STABILIZER_DEADBAND)
     {
-      // Calculate proportional step
-      step = error / STABILIZER_KP_DIVISOR;
+      // Proportional step 
+      step_p = (float)(error - error_prev) * STABILIZER_KP;
 
-      // Limit the step size to prevent aggressive changes
-      if (step > STABILIZER_MAX_STEP)
-      {
-        step = STABILIZER_MAX_STEP;
-      }
-      else if (step < -STABILIZER_MAX_STEP)
-      {
-        step = -STABILIZER_MAX_STEP;
-      }
-    }
+      // Integral step 
+      step_i = (float)error * STABILIZER_KI;
 
-    // Adjust dac_output
-    int32_t new_dac_output = (int32_t)dac_output + step;
+      // Derivative step 
+      step_d = (float)((error - error_prev) - (error_prev - error_prev2)) * STABILIZER_KD;
 
-    // Clamp dac_output to valid range (0-255)
-    if (new_dac_output > 255)
-    {
-      dac_output = 255;
-    }
-    else if (new_dac_output < 0)
-    {
-      dac_output = 0;
+      // Combine PID terms to calculate the step adjustment
+      step = step_p + step_i + step_d;
     }
     else
     {
-      dac_output = (uint8_t)new_dac_output;
+      // Inside deadband: stop moving the output
+      step = 0.0f;
     }
+
+    // Update previous errors for the NEXT calculation
+    error_prev2 = error_prev;
+    error_prev = error;
+
+    // Accumulate the precise floating-point output
+    pid_dac_out += step;
+
+    // Clamp the internal float to valid DAC limits
+    if (pid_dac_out > 255.0f)
+    {
+      pid_dac_out = 255.0f;
+    }
+    else if (pid_dac_out < 0.0f)
+    {
+      pid_dac_out = 0.0f;
+    }
+
+    // Output the integer portion to the physical DAC
+    dac_output = (uint8_t)pid_dac_out;
 
     WritePortByte(GPIOB, 1, dac_output);
   }
