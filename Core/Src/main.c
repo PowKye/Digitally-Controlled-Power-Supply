@@ -901,9 +901,8 @@ void App_ProcessUartCommand(void)
     if (flag_target_updated_serial)
     {
       // Clamp the target voltage to a valid range
-      const uint32_t max_voltage_mV = MAX_MILV;
-      if (target_voltage_mV > max_voltage_mV)
-        target_voltage_mV = max_voltage_mV;
+      if (target_voltage_mV > MAX_MILV)
+        target_voltage_mV = MAX_MILV;
 
       // Update the integer adc_target from the float voltage
       __disable_irq();
@@ -973,11 +972,10 @@ void App_HandleEncoderRotation(void)
     int32_t new_target_mV = (int32_t)target_voltage_mV + (clicks * 100);
 
     // Clamp the target voltage to a valid range
-    const int32_t max_voltage_mV = MAX_MILV;
     if (new_target_mV < 0)
       target_voltage_mV = 0;
-    else if (new_target_mV > max_voltage_mV)
-      target_voltage_mV = max_voltage_mV;
+    else if (new_target_mV > MAX_MILV)
+      target_voltage_mV = MAX_MILV;
     else
       target_voltage_mV = (uint32_t)new_target_mV;
 
